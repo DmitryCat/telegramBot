@@ -1,6 +1,8 @@
 package com.papcha.telegramBot.bot;
 
+import com.papcha.telegramBot.model.BotMessage;
 import com.papcha.telegramBot.model.UserCaptcha;
+import com.papcha.telegramBot.service.BotMessageService;
 import com.papcha.telegramBot.service.CaptchaService;
 import com.papcha.telegramBot.service.UserStateService;
 import jakarta.annotation.PostConstruct;
@@ -13,6 +15,7 @@ import org.telegram.telegrambots.meta.api.methods.GetMe;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.BanChatMember;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.RestrictChatMember;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
 import org.telegram.telegrambots.meta.api.objects.ChatPermissions;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
@@ -26,6 +29,7 @@ public class CaptchaBot extends TelegramLongPollingBot {
 
     private final CaptchaService captchaService;
     private final UserStateService userStateService;
+    private final BotMessageService botMessageService;
 
     @Override
     public String getBotUsername() {
@@ -34,7 +38,7 @@ public class CaptchaBot extends TelegramLongPollingBot {
 
     @Override
     public String getBotToken() {
-        return "Token";
+        return "-";
     }
 
     @PostConstruct
@@ -50,15 +54,13 @@ public class CaptchaBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-        System.out.println("Получено обновление: " + update);
-
         // ✅ Новый пользователь в группе
         if (update.hasMessage() && update.getMessage().getNewChatMembers() != null) {
             update.getMessage().getNewChatMembers().forEach(user -> {
                 Long groupChatId = update.getMessage().getChatId();
                 Long userId = user.getId();
 
-                // Ограничим права (нельзя писать, только читать)
+                // Ограничим права (только читать)
                 ChatPermissions noPermissions = ChatPermissions.builder()
                         .canSendMessages(false)
                         .build();
@@ -82,7 +84,7 @@ public class CaptchaBot extends TelegramLongPollingBot {
 
                 UserCaptcha userCaptcha = new UserCaptcha(
                         groupChatId,
-                        userId,     // личка = userId
+                        userId,
                         userId,
                         answer,
                         System.currentTimeMillis() + 60000,
@@ -90,7 +92,7 @@ public class CaptchaBot extends TelegramLongPollingBot {
                 );
                 userStateService.addUser(userCaptcha);
 
-                // Отправим капчу в личку
+                // Отправляем капчу в личку
                 SendMessage msg = new SendMessage(userId.toString(),
                         "Привет, @" + user.getUserName() + "! Реши капчу: " + question + " (у тебя есть 60 секунд)");
                 try {
@@ -128,9 +130,18 @@ public class CaptchaBot extends TelegramLongPollingBot {
 
                     try {
                         execute(allow);
-                        execute(new SendMessage(uc.getGroupChatId().toString(),
-                                "✅ @" + uc.getUserName() + " прошёл капчу! Добро пожаловать!"));
+
+                        // Отправка сообщения в группу
+                        SendMessage groupMsg = new SendMessage(uc.getGroupChatId().toString(),
+                                "✅ @" + uc.getUserName() + " прошёл капчу! Добро пожаловать!");
+                        org.telegram.telegrambots.meta.api.objects.Message sentMessage = execute(groupMsg);
+
+                        // Сохраняем для удаления через 10 секунд
+                        botMessageService.add(uc.getGroupChatId().toString(), sentMessage.getMessageId());
+
+                        // Личное сообщение пользователю
                         execute(new SendMessage(userId.toString(), "Капча пройдена ✅"));
+
                     } catch (TelegramApiException e) {
                         e.printStackTrace();
                     }
@@ -146,6 +157,7 @@ public class CaptchaBot extends TelegramLongPollingBot {
             }
         }
     }
+
 
     // Проверка истечения капчи
     @Scheduled(fixedRate = 10000)
@@ -167,5 +179,17 @@ public class CaptchaBot extends TelegramLongPollingBot {
                 userStateService.removeUser(userCaptcha.getUserId());
             }
         });
+    }
+    @Scheduled(fixedRate = 30000) // каждые 10 секунд
+    public void deleteBotMessages() {
+        for (BotMessage m : botMessageService.getAll()) {
+            try {
+                execute(new DeleteMessage(m.getChatId(), m.getMessageId()));
+            } catch (TelegramApiException e) {
+                e.printStackTrace();
+            } finally {
+                botMessageService.remove(m);
+            }
+        }
     }
 }
